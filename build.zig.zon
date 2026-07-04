@@ -1,0 +1,35 @@
+.{
+    .name = .SIP_Actions,
+
+    .version = "0.0.0",
+
+    .fingerprint = 0x41b991b2bb592a5d, // Changing this has security and trust implications.
+    // Tracks the earliest Zig version that the package considers to be a
+    // supported use case.
+    .minimum_zig_version = "0.16.0",
+    // This field is optional.
+    // Each dependency must either provide a `url` and `hash`, or a `path`.
+    // `zig build --fetch` can be used to fetch all dependencies of a package, recursively.
+    // Once all dependencies are fetched, `zig build` no longer requires
+    // internet connectivity.
+    .dependencies = .{
+        .sip = .{
+            .url = "https://github.com/soundhearddev/sip/archive/refs/tags/0.1.5-beta1.tar.gz",
+            .hash = "sip-0.1.5-QVQ7bGcSAQCA9Dwoiz2GoDo41ws9B5W1BqtedHweJ1Fl",
+        },
+
+        .siputils = .{
+            .url = "https://github.com/soundhearddev/siputils/archive/refs/tags/0.1.1-Beta.tar.gz",
+            .hash = "siputils-0.1.1-i-D9o3NGAgAfXjbP86vVJJb8XxTkPd3btFdknFYCAFXj",
+        },
+    },
+
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        // For example...
+        //"LICENSE",
+        //"README.md",
+    },
+}
