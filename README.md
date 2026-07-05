@@ -8,5 +8,5 @@ A small remote command execution tool
 
 ## Install 
 ``` bash
-    zig build 
+zig build 
 ```
