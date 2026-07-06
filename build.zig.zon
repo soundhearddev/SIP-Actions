@@ -14,8 +14,8 @@
         },
 
         .siputils = .{
-            .url = "https://github.com/soundhearddev/siputils/archive/refs/tags/0.1.1-Beta.tar.gz",
-            .hash = "siputils-0.1.1-i-D9o3NGAgAfXjbP86vVJJb8XxTkPd3btFdknFYCAFXj",
+            .url = "https://github.com/soundhearddev/siputils/archive/refs/tags/0.1.2-Beta.tar.gz",
+            .hash = "siputils-0.1.2-i-D9o7xjAgAnLrE2DjZ9kR5u2spJe1jGknU1_YLoQYbu",
         },
     },
 

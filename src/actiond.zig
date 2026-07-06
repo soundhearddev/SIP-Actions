@@ -2,40 +2,11 @@ const std = @import("std");
 const sip = @import("sip");
 const actions = @import("actions.zig");
 const utils = @import("siputils");
+const sipd = utils.sipd;
 const keymng = utils.keymng;
 const registry = utils.registry;
 
 const Io = std.Io;
-
-fn loadServerIdentity(io: std.Io, gpa: std.mem.Allocator, identity_name: []const u8) !sip.identity.KeyPair {
-    const prompt_msg = try std.fmt.allocPrint(gpa, "[{s}] Passwort", .{identity_name});
-    defer gpa.free(prompt_msg);
-    const password = try promptPassword(gpa, prompt_msg);
-    defer gpa.free(password);
-    return keymng.loadIdentity(io, identity_name, password);
-}
-
-fn promptPassword(allocator: std.mem.Allocator, prompt_text: []const u8) ![]u8 {
-    std.debug.print("{s}: ", .{prompt_text});
-    const fd = std.posix.STDIN_FILENO;
-    const original_termios = try std.posix.tcgetattr(fd);
-    var no_echo_termios = original_termios;
-    no_echo_termios.lflag.ECHO = false;
-    no_echo_termios.lflag.ECHONL = false;
-    try std.posix.tcsetattr(fd, .NOW, no_echo_termios);
-    defer {
-        std.posix.tcsetattr(fd, .NOW, original_termios) catch {};
-        std.debug.print("\n", .{});
-    }
-    var buf: [1024]u8 = undefined;
-    const n = try std.posix.read(fd, &buf);
-    var len = n;
-    if (len > 0 and buf[len - 1] == '\n') len -= 1;
-    if (len > 0 and buf[len - 1] == '\r') len -= 1;
-    const password = try allocator.alloc(u8, len);
-    @memcpy(password, buf[0..len]);
-    return password;
-}
 
 const RATE_LIMIT_MAX_PER_WINDOW: u32 = 30;
 const RATE_LIMIT_WINDOW_SECONDS: i64 = 60;
@@ -235,19 +206,6 @@ fn handleConnection(
     };
 }
 
-fn getIdentityPassword(gpa: std.mem.Allocator, identity_name: []const u8) ![]u8 {
-    var env_buf: [64]u8 = undefined;
-    const env_name = std.fmt.bufPrint(&env_buf, "ACTIOND_PASSWORD_{s}", .{identity_name}) catch identity_name;
-
-    if (std.process.getEnvVarOwned(gpa, env_name)) |val| {
-        return val;
-    } else |_| {}
-
-    const prompt_msg = try std.fmt.allocPrint(gpa, "[{s}] Passwort", .{identity_name});
-    defer gpa.free(prompt_msg);
-    return promptPassword(gpa, prompt_msg);
-}
-
 fn buildWhoamiResponse(buf: []u8, ctx: DispatchContext) actions.ActionResponse {
     const msg = std.fmt.bufPrint(buf,
         \\{{"identity":"{s}","address":"{x}"}}
@@ -290,7 +248,7 @@ fn buildPeerListResponse(buf: []u8, ctx: DispatchContext) actions.ActionResponse
 fn buildRegistryLookupResponse(buf: []u8, io: std.Io, arg: []const u8) actions.ActionResponse {
     if (arg.len == 0) return .{ .ok = false, .message = "missing name arg" };
 
-    const result = registry.resolve(io, undefined, arg) catch {
+    const result = registry.resolve(io, arg) catch {
         return .{ .ok = false, .message = "not found" };
     };
 
@@ -319,18 +277,32 @@ fn buildRegistryLookupResponse(buf: []u8, io: std.Io, arg: []const u8) actions.A
     }
 }
 
-fn setReuseAddr(sock: sip.synet.Socket) void {
-    const val: c_int = 1;
-    const rc = std.os.linux.setsockopt(
-        sock,
-        std.os.linux.SOL.SOCKET,
-        std.os.linux.SO.REUSEADDR,
-        std.mem.asBytes(&val),
-        @sizeOf(c_int),
-    );
-    if (rc != 0) {
-        std.debug.print("Warning: failed to set SO_REUSEADDR\n", .{});
-    }
+const AcceptContext = struct {
+    gpa: std.mem.Allocator,
+    server_keys: sip.identity.KeyPair,
+    server_addr: [16]u8,
+    identity_name: []const u8,
+    rate_limiter: *actions.RateLimiter,
+    audit_log: *actions.AuditLog,
+    metrics: *Metrics,
+    verbose: bool,
+};
+
+fn onAccept(io: std.Io, ctx: AcceptContext, conn: sip.synet.Socket) void {
+    handleConnection(
+        io,
+        ctx.gpa,
+        conn,
+        ctx.server_keys,
+        ctx.server_addr,
+        ctx.identity_name,
+        ctx.rate_limiter,
+        ctx.audit_log,
+        ctx.metrics,
+        ctx.verbose,
+    ) catch |err| {
+        std.debug.print("[actiond] Verbindung fehlgeschlagen: {}\n", .{err});
+    };
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -339,36 +311,33 @@ pub fn main(init: std.process.Init) !void {
 
     const argv = try init.minimal.args.toSlice(init.arena.allocator());
 
-    var metrics = Metrics.init(@intCast(@divFloor(std.Io.Timestamp.now(io, .real).toNanoseconds(), std.time.ns_per_s)));
+    var idx: usize = 1;
+    var args = utils.cmdhandler.ArgIter{ .argv = argv, .idx = &idx };
 
-    var identity_name: []const u8 = "default";
-    {
-        var i: usize = 1;
-        while (i < argv.len) : (i += 1) {
-            if (std.mem.eql(u8, argv[i], "--identity") and i + 1 < argv.len) {
-                i += 1;
-                identity_name = argv[i];
-            }
+    var config_path: []const u8 = sipd.CONFIG_PATH;
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--config")) {
+            config_path = args.next() orelse {
+                std.debug.print("Fehler: --config benötigt einen Pfad\n", .{});
+                return error.MissingArgument;
+            };
         }
     }
 
-    const server_keys = try loadServerIdentity(io, gpa, identity_name);
+    const config = try sipd.loadConfig(io, gpa, config_path);
+
+    var metrics = Metrics.init(@intCast(@divFloor(std.Io.Timestamp.now(io, .real).toNanoseconds(), std.time.ns_per_s)));
+
+    const server_keys = try sipd.loadOrCreateIdentity(init, config.identity_name);
     const server_addr = sip.identity.baseAddress(server_keys.public);
 
     var addr_buf: [80]u8 = undefined;
-    const addr_str = try sip.identity.formatSipAddress(&addr_buf, identity_name, server_addr);
-    std.debug.print("actiond starting, address={s}\n", .{addr_str});
+    const addr_str = try sip.identity.formatSipAddress(&addr_buf, config.identity_name, server_addr);
+    std.debug.print("[actiond] starte, Adresse={s}\n", .{addr_str});
 
-    const listen_sock = try sip.synet.createTcpSocket();
-    defer sip.synet.close(listen_sock);
-
-    setReuseAddr(listen_sock);
-
-    const port: u16 = 4433;
-    var sockaddr = sip.synet.buildSockaddrIn(.{ 0, 0, 0, 0 }, port);
-    try sip.synet.bind(listen_sock, &sockaddr);
-    try sip.synet.listen(listen_sock, 16);
-    std.debug.print("actiond is listening on port {d}\n", .{port});
+    const listener = try sipd.createListener(config);
+    defer sip.synet.close(listener);
+    std.debug.print("[actiond] lauscht auf Port {d}\n", .{config.port});
 
     var rate_limit_entries: [256]actions.RateLimiter.Entry = undefined;
     var rate_limiter = actions.RateLimiter.init(&rate_limit_entries, RATE_LIMIT_MAX_PER_WINDOW, RATE_LIMIT_WINDOW_SECONDS);
@@ -376,14 +345,18 @@ pub fn main(init: std.process.Init) !void {
     var audit_entries: [AUDIT_LOG_CAPACITY]actions.AuditEntry = undefined;
     var audit_log = actions.AuditLog.init(&audit_entries);
 
-    while (true) {
-        const client_sock = sip.synet.accept(listen_sock) catch |err| {
-            std.debug.print("Connection failed: {}\n", .{err});
-            continue;
-        };
+    const accept_ctx = AcceptContext{
+        .gpa = gpa,
+        .server_keys = server_keys,
+        .server_addr = server_addr,
+        .identity_name = config.identity_name,
+        .rate_limiter = &rate_limiter,
+        .audit_log = &audit_log,
+        .metrics = &metrics,
+        .verbose = config.verbose,
+    };
 
-        handleConnection(io, gpa, client_sock, server_keys, server_addr, identity_name, &rate_limiter, &audit_log, &metrics, true) catch |err| {
-            std.debug.print("accept failed: {}\n", .{err});
-        };
-    }
+    try sipd.acceptLoop(io, listener, accept_ctx, onAccept);
+
+    std.debug.print("[actiond] heruntergefahren\n", .{});
 }

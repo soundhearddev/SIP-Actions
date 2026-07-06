@@ -10,3 +10,4 @@ A small remote command execution tool
 ``` bash
 zig build 
 ```
+
