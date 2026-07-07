@@ -38,7 +38,6 @@ fn dispatch(buf: []u8, action: actions.Action, arg: []const u8, ctx: DispatchCon
         .ping => .{ .ok = true, .message = "pong" },
         .status => buildStatusResponse(buf, ctx),
         .reload_config => .{ .ok = true, .message = "config reloaded" },
-        .shutdown => .{ .ok = false, .message = "shutdown not permitted" },
         .echo => .{ .ok = true, .message = arg },
         .metrics => buildMetricsResponse(buf, ctx),
         .peer_list => buildPeerListResponse(buf, ctx),

@@ -4,12 +4,11 @@ pub const Action = enum(u8) {
     ping = 0x01,
     status = 0x02,
     reload_config = 0x03,
-    shutdown = 0x04,
-    echo = 0x05,
-    metrics = 0x06,
-    peer_list = 0x07,
-    registry_lookup = 0x08,
-    whoami = 0x09,
+    echo = 0x04,
+    metrics = 0x05,
+    peer_list = 0x06,
+    registry_lookup = 0x07,
+    whoami = 0x08,
     _,
 };
 
@@ -80,12 +79,11 @@ pub const Permission = enum(u16) {
     ping = 1 << 0,
     status = 1 << 1,
     reload_config = 1 << 2,
-    shutdown = 1 << 3,
-    echo = 1 << 4,
-    metrics = 1 << 5,
-    peer_list = 1 << 6,
-    registry_lookup = 1 << 7,
-    whoami = 1 << 8,
+    echo = 1 << 3,
+    metrics = 1 << 4,
+    peer_list = 1 << 5,
+    registry_lookup = 1 << 6,
+    whoami = 1 << 7,
 };
 
 pub const PermissionSet = struct {
@@ -115,7 +113,6 @@ fn permissionForAction(action: Action) ?Permission {
         .ping => .ping,
         .status => .status,
         .reload_config => .reload_config,
-        .shutdown => .shutdown,
         .echo => .echo,
         .metrics => .metrics,
         .peer_list => .peer_list,
@@ -230,18 +227,9 @@ test "ActionRequest parse lehnt zu kurzen Payload ab" {
     try testing.expectError(ActionError.MalformedRequest, ActionRequest.parse(&too_short));
 }
 
-test "isAuthorized: default_safe erlaubt ping, verbietet shutdown" {
-    try isAuthorized(PermissionSet.default_safe, .ping);
-    try testing.expectError(ActionError.NotAuthorized, isAuthorized(PermissionSet.default_safe, .shutdown));
-}
-
 test "isAuthorized: none verbietet alles" {
     try testing.expectError(ActionError.NotAuthorized, isAuthorized(PermissionSet.none, .ping));
     try testing.expectError(ActionError.NotAuthorized, isAuthorized(PermissionSet.none, .whoami));
-}
-
-test "isAuthorized: all erlaubt auch shutdown" {
-    try isAuthorized(PermissionSet.all, .shutdown);
 }
 
 test "ActionResponse encode/decode roundtrip" {
@@ -292,7 +280,6 @@ test "AuditLog zeichnet Eintraege auf und liefert sie neueste zuerst" {
     const addr = [_]u8{0x01} ** 16;
 
     log.record(addr, .ping, 1000, true);
-    log.record(addr, .shutdown, 1001, false);
 
     const Collector = struct {
         seen: *std.ArrayList(Action),
@@ -306,7 +293,6 @@ test "AuditLog zeichnet Eintraege auf und liefert sie neueste zuerst" {
     log.forEachRecent(Collector, .{ .seen = &seen }, Collector.cb);
 
     try testing.expectEqual(@as(usize, 2), seen.items.len);
-    try testing.expectEqual(Action.shutdown, seen.items[0]);
     try testing.expectEqual(Action.ping, seen.items[1]);
 }
 
