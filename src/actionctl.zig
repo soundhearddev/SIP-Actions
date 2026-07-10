@@ -11,7 +11,7 @@ fn printUsage() void {
         \\actionctl - SIP action client
         \\
         \\  actionctl [--identity NAME] <host> <port> <action> [arg]
-        \\      Actions: ping, status, reload_config, shutdown, echo, metrics, peer_list, registry_lookup, whoami
+        \\      Actions: ping, status, reload_config, echo, metrics, peer_list, registry_lookup, whoami
         \\      If --identity is omitted, the default identity is used.
     , .{});
 }
@@ -64,6 +64,7 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("Unknown action: {s}\n", .{action_str});
         return error.UnknownAction;
     };
+
     const arg = if (pos_count > 3) pos_buf[3] else "";
 
     var default_buf: [64]u8 = undefined;
@@ -144,6 +145,11 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print("handshake ok, server={x} conn_id={x}\n", .{ session.peer_address, session.conn_id });
 
+    // seq_num=0 ist hier sicher, weil jede Verbindung genau einen Request
+    // sendet und dann geschlossen wird (siehe actiond.handleConnection).
+    // Falls das je auf Connection-Reuse mit mehreren Requests umgestellt
+    // wird, MUSS seq_num pro gesendetem Paket hochgezählt werden, sonst
+    // wiederholt sich der aus (conn_id, seq_num) abgeleitete Nonce.
     const seq_num: u32 = 0;
 
     var req_buf: [512]u8 = undefined;
@@ -174,14 +180,21 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    const resp = actions.ActionResponse.decode(inbound.parsed.payload) catch {
+    const reply = actions.ServerReply.decode(inbound.parsed.payload) catch {
         std.debug.print("ungültige Antwort vom Server\n", .{});
         return;
     };
 
-    if (resp.ok) {
-        std.debug.print("OK: {s}\n", .{resp.message});
-    } else {
-        std.debug.print("FEHLER: {s}\n", .{resp.message});
+    switch (reply) {
+        .action => |resp| {
+            if (resp.ok) {
+                std.debug.print("OK: {s}\n", .{resp.message});
+            } else {
+                std.debug.print("FEHLER: {s}\n", .{resp.message});
+            }
+        },
+        .protocol_error => |e| {
+            std.debug.print("SERVERFEHLER [{s}]: {s}\n", .{ @tagName(e.code), e.message });
+        },
     }
 }

@@ -9,13 +9,13 @@
 
     .dependencies = .{
         .sip = .{
-            .url = "https://github.com/soundhearddev/sip/archive/refs/tags/0.1.5-beta1.tar.gz",
-            .hash = "sip-0.1.5-QVQ7bGcSAQCA9Dwoiz2GoDo41ws9B5W1BqtedHweJ1Fl",
+            .url = "https://github.com/soundhearddev/sip/archive/refs/tags/0.1.6-beta1.tar.gz",
+            .hash = "sip-0.1.6-QVQ7bCQYAQBtZkt3INoXoaZF05qsaqWEb1_ji4II5yVi",
         },
 
         .siputils = .{
-            .url = "https://github.com/soundhearddev/siputils/archive/refs/tags/0.1.2-Beta.tar.gz",
-            .hash = "siputils-0.1.2-i-D9o7xjAgAnLrE2DjZ9kR5u2spJe1jGknU1_YLoQYbu",
+            .url = "https://github.com/soundhearddev/siputils/archive/refs/tags/0.1.3-Beta.tar.gz",
+            .hash = "siputils-0.1.3-i-D9o2eiAgCJsB5QmuqewEeTwGNlChEM0_pJeNluls4j",
         },
     },
 

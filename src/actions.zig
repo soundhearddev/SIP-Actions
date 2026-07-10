@@ -12,8 +12,6 @@ pub const Action = enum(u8) {
     _,
 };
 
-pub const ACTION_REQUEST_VERSION: u8 = 1;
-
 pub const ActionError = error{
     UnknownAction,
     NotAuthorized,
@@ -22,10 +20,10 @@ pub const ActionError = error{
 } || std.mem.Allocator.Error;
 
 pub const ActionRequest = struct {
-    version: u8,
     action: Action,
     arg: []const u8,
 
+    // Der Header besteht jetzt aus: 1 Byte Action + 1 Byte Länge
     const FIXED_HEADER_LEN = 2;
 
     pub fn build(out: []u8, action: Action, arg: []const u8) !usize {
@@ -33,22 +31,34 @@ pub const ActionRequest = struct {
         if (out.len < FIXED_HEADER_LEN + arg.len) return ActionError.MalformedRequest;
 
         var w: usize = 0;
-        out[w] = ACTION_REQUEST_VERSION;
-        w += 1;
+        // 1. Action-Typ schreiben
         out[w] = @intFromEnum(action);
         w += 1;
-        @memcpy(out[w..][0..arg.len], arg);
-        w += arg.len;
+
+        // 2. Die tatsächliche Länge des Arguments schreiben (0 bis 255)
+        out[w] = @intCast(arg.len);
+        w += 1;
+
+        // 3. Das Argument selbst schreiben (falls vorhanden)
+        if (arg.len > 0) {
+            @memcpy(out[w..][0..arg.len], arg);
+            w += arg.len;
+        }
 
         return w;
     }
 
     pub fn parse(payload: []const u8) ActionError!ActionRequest {
+        // Ein gültiges Paket MUSS mindestens den 2-Byte-Header enthalten
         if (payload.len < FIXED_HEADER_LEN) return ActionError.MalformedRequest;
 
+        const arg_len = payload[1];
+
+        // Prüfen, ob der restliche Payload exakt mit der angegebenen Länge übereinstimmt
+        if (payload.len - FIXED_HEADER_LEN != arg_len) return ActionError.MalformedRequest;
+
         return ActionRequest{
-            .version = payload[0],
-            .action = @enumFromInt(payload[1]),
+            .action = @enumFromInt(payload[0]),
             .arg = payload[FIXED_HEADER_LEN..],
         };
     }
@@ -72,6 +82,73 @@ pub const ActionResponse = struct {
         const msg_len = std.mem.readInt(u16, data[1..3], .big);
         if (3 + msg_len != data.len) return error.MalformedResponse;
         return .{ .ok = ok, .message = data[3..] };
+    }
+};
+
+// ServerReply ist das äußere Wire-Format für alles, was actiond nach einem
+// erfolgreichen Handshake über die verschlüsselte Verbindung zurückschickt.
+// Vorher gab es dafür gar kein Format: interne/Protokollfehler (kaputtes
+// Paket, falsches Command, ungültiger Payload, Antwortpuffer zu klein)
+// führten einfach zu einem stillen `return`, der Client sah nur ein
+// TCP-Reset/EOF. ServerReply unterscheidet per Tag-Byte zwischen einer
+// regulären ActionResponse (Ergebnis einer erfolgreich dispatchten Aktion)
+// und einem ProtocolError (die Aktion konnte gar nicht erst ausgeführt
+// werden). Beides landet im gleichen .Data-Paket, sodass actionctl immer
+// eine strukturierte, decodierbare Antwort bekommt statt eines nackten
+// Verbindungsabbruchs.
+pub const ErrorCode = enum(u8) {
+    malformed_packet = 1,
+    unexpected_command = 2,
+    invalid_payload = 3,
+    internal_error = 4,
+    response_too_large = 5,
+    _,
+};
+
+pub const ProtocolError = struct {
+    code: ErrorCode,
+    message: []const u8,
+};
+
+pub const ServerReply = union(enum) {
+    action: ActionResponse,
+    protocol_error: ProtocolError,
+
+    const TAG_ACTION: u8 = 0;
+    const TAG_ERROR: u8 = 1;
+
+    pub fn encode(self: ServerReply, out: []u8) ![]u8 {
+        switch (self) {
+            .action => |resp| {
+                if (out.len < 1) return error.BufferTooSmall;
+                out[0] = TAG_ACTION;
+                const body = try resp.encode(out[1..]);
+                return out[0 .. 1 + body.len];
+            },
+            .protocol_error => |e| {
+                if (out.len < 1 + 1 + 2 + e.message.len) return error.BufferTooSmall;
+                out[0] = TAG_ERROR;
+                out[1] = @intFromEnum(e.code);
+                std.mem.writeInt(u16, out[2..4], @intCast(e.message.len), .big);
+                @memcpy(out[4..][0..e.message.len], e.message);
+                return out[0 .. 4 + e.message.len];
+            },
+        }
+    }
+
+    pub fn decode(data: []const u8) !ServerReply {
+        if (data.len < 1) return error.MalformedResponse;
+        return switch (data[0]) {
+            TAG_ACTION => .{ .action = try ActionResponse.decode(data[1..]) },
+            TAG_ERROR => blk: {
+                if (data.len < 4) return error.MalformedResponse;
+                const code: ErrorCode = @enumFromInt(data[1]);
+                const msg_len = std.mem.readInt(u16, data[2..4], .big);
+                if (4 + msg_len != data.len) return error.MalformedResponse;
+                break :blk .{ .protocol_error = .{ .code = code, .message = data[4..] } };
+            },
+            else => error.MalformedResponse,
+        };
     }
 };
 
@@ -146,13 +223,19 @@ pub const RateLimiter = struct {
 
     pub fn allow(self: *RateLimiter, addr: [16]u8, now: i64) bool {
         var free_slot: ?usize = null;
+        var expired_slot: ?usize = null;
 
         for (self.entries, 0..) |*e, i| {
             if (!e.used) {
                 if (free_slot == null) free_slot = i;
                 continue;
             }
-            if (!std.mem.eql(u8, &e.addr, &addr)) continue;
+            if (!std.mem.eql(u8, &e.addr, &addr)) {
+                if (expired_slot == null and now - e.window_start >= self.window_seconds) {
+                    expired_slot = i;
+                }
+                continue;
+            }
 
             if (now - e.window_start >= self.window_seconds) {
                 e.window_start = now;
@@ -165,7 +248,11 @@ pub const RateLimiter = struct {
             return true;
         }
 
-        const slot = free_slot orelse 0;
+        // Kein Eintrag für addr gefunden -> neuen Slot belegen. Bevorzugt
+        // einen wirklich freien Slot, sonst einen mit abgelaufenem Fenster
+        // (das verdrängt keinen Peer, der gerade noch aktiv limitiert
+        // wird), erst als letzten Ausweg Slot 0 blind überschreiben.
+        const slot = free_slot orelse expired_slot orelse 0;
         self.entries[slot] = .{ .addr = addr, .window_start = now, .count = 1, .used = true };
         return true;
     }
@@ -241,6 +328,33 @@ test "ActionResponse encode/decode roundtrip" {
     try testing.expectEqualSlices(u8, "pong", decoded.message);
 }
 
+test "ServerReply encode/decode roundtrip: Action-Antwort" {
+    const reply = ServerReply{ .action = .{ .ok = true, .message = "pong" } };
+    var buf: [64]u8 = undefined;
+    const encoded = try reply.encode(&buf);
+    const decoded = try ServerReply.decode(encoded);
+
+    try testing.expect(decoded == .action);
+    try testing.expect(decoded.action.ok);
+    try testing.expectEqualSlices(u8, "pong", decoded.action.message);
+}
+
+test "ServerReply encode/decode roundtrip: Protocol-Error" {
+    const reply = ServerReply{ .protocol_error = .{ .code = .invalid_payload, .message = "bad payload" } };
+    var buf: [64]u8 = undefined;
+    const encoded = try reply.encode(&buf);
+    const decoded = try ServerReply.decode(encoded);
+
+    try testing.expect(decoded == .protocol_error);
+    try testing.expectEqual(ErrorCode.invalid_payload, decoded.protocol_error.code);
+    try testing.expectEqualSlices(u8, "bad payload", decoded.protocol_error.message);
+}
+
+test "ServerReply decode lehnt unbekannten Tag ab" {
+    const bogus = [_]u8{0xFF};
+    try testing.expectError(error.MalformedResponse, ServerReply.decode(&bogus));
+}
+
 test "RateLimiter erlaubt bis zum Limit, dann nicht mehr" {
     var buf: [4]RateLimiter.Entry = undefined;
     var limiter = RateLimiter.init(&buf, 3, 60);
@@ -280,6 +394,7 @@ test "AuditLog zeichnet Eintraege auf und liefert sie neueste zuerst" {
     const addr = [_]u8{0x01} ** 16;
 
     log.record(addr, .ping, 1000, true);
+    log.record(addr, .status, 1001, true);
 
     const Collector = struct {
         seen: *std.ArrayList(Action),
@@ -293,6 +408,7 @@ test "AuditLog zeichnet Eintraege auf und liefert sie neueste zuerst" {
     log.forEachRecent(Collector, .{ .seen = &seen }, Collector.cb);
 
     try testing.expectEqual(@as(usize, 2), seen.items.len);
+    try testing.expectEqual(Action.status, seen.items[0]);
     try testing.expectEqual(Action.ping, seen.items[1]);
 }
 
