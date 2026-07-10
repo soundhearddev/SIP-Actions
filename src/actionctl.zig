@@ -145,11 +145,6 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print("handshake ok, server={x} conn_id={x}\n", .{ session.peer_address, session.conn_id });
 
-    // seq_num=0 ist hier sicher, weil jede Verbindung genau einen Request
-    // sendet und dann geschlossen wird (siehe actiond.handleConnection).
-    // Falls das je auf Connection-Reuse mit mehreren Requests umgestellt
-    // wird, MUSS seq_num pro gesendetem Paket hochgezählt werden, sonst
-    // wiederholt sich der aus (conn_id, seq_num) abgeleitete Nonce.
     const seq_num: u32 = 0;
 
     var req_buf: [512]u8 = undefined;

@@ -23,7 +23,6 @@ pub const ActionRequest = struct {
     action: Action,
     arg: []const u8,
 
-    // Der Header besteht jetzt aus: 1 Byte Action + 1 Byte Länge
     const FIXED_HEADER_LEN = 2;
 
     pub fn build(out: []u8, action: Action, arg: []const u8) !usize {
@@ -31,15 +30,12 @@ pub const ActionRequest = struct {
         if (out.len < FIXED_HEADER_LEN + arg.len) return ActionError.MalformedRequest;
 
         var w: usize = 0;
-        // 1. Action-Typ schreiben
         out[w] = @intFromEnum(action);
         w += 1;
 
-        // 2. Die tatsächliche Länge des Arguments schreiben (0 bis 255)
         out[w] = @intCast(arg.len);
         w += 1;
 
-        // 3. Das Argument selbst schreiben (falls vorhanden)
         if (arg.len > 0) {
             @memcpy(out[w..][0..arg.len], arg);
             w += arg.len;
@@ -49,12 +45,10 @@ pub const ActionRequest = struct {
     }
 
     pub fn parse(payload: []const u8) ActionError!ActionRequest {
-        // Ein gültiges Paket MUSS mindestens den 2-Byte-Header enthalten
         if (payload.len < FIXED_HEADER_LEN) return ActionError.MalformedRequest;
 
         const arg_len = payload[1];
 
-        // Prüfen, ob der restliche Payload exakt mit der angegebenen Länge übereinstimmt
         if (payload.len - FIXED_HEADER_LEN != arg_len) return ActionError.MalformedRequest;
 
         return ActionRequest{
@@ -85,17 +79,6 @@ pub const ActionResponse = struct {
     }
 };
 
-// ServerReply ist das äußere Wire-Format für alles, was actiond nach einem
-// erfolgreichen Handshake über die verschlüsselte Verbindung zurückschickt.
-// Vorher gab es dafür gar kein Format: interne/Protokollfehler (kaputtes
-// Paket, falsches Command, ungültiger Payload, Antwortpuffer zu klein)
-// führten einfach zu einem stillen `return`, der Client sah nur ein
-// TCP-Reset/EOF. ServerReply unterscheidet per Tag-Byte zwischen einer
-// regulären ActionResponse (Ergebnis einer erfolgreich dispatchten Aktion)
-// und einem ProtocolError (die Aktion konnte gar nicht erst ausgeführt
-// werden). Beides landet im gleichen .Data-Paket, sodass actionctl immer
-// eine strukturierte, decodierbare Antwort bekommt statt eines nackten
-// Verbindungsabbruchs.
 pub const ErrorCode = enum(u8) {
     malformed_packet = 1,
     unexpected_command = 2,
@@ -248,10 +231,6 @@ pub const RateLimiter = struct {
             return true;
         }
 
-        // Kein Eintrag für addr gefunden -> neuen Slot belegen. Bevorzugt
-        // einen wirklich freien Slot, sonst einen mit abgelaufenem Fenster
-        // (das verdrängt keinen Peer, der gerade noch aktiv limitiert
-        // wird), erst als letzten Ausweg Slot 0 blind überschreiben.
         const slot = free_slot orelse expired_slot orelse 0;
         self.entries[slot] = .{ .addr = addr, .window_start = now, .count = 1, .used = true };
         return true;

@@ -77,23 +77,6 @@ fn handleActionPayload(
     return resp;
 }
 
-// Fix: fehlende strukturierte Fehlerantworten (neues Wire-Format nötig).
-//
-// Vorher endete jeder Fehler nach dem Handshake (kaputtes Paket, falsches
-// Command, ungültiger Payload, Antwortpuffer zu klein) in einem stillen
-// `return`: geloggt wurde nur serverseitig, der Client sah über
-// `defer sip.synet.close(sock)` nichts weiter als ein TCP-Reset/EOF. Für
-// ein CLI-Tool wie actionctl bedeutete das: jeder interne Serverfehler sah
-// für den Nutzer wie "ungültige Antwort vom Server" oder ein Timeout aus,
-// ganz ohne Diagnosewert.
-//
-// sendProtocolError nutzt die schon etablierte, verschlüsselte Session
-// (die an dieser Stelle immer existiert, weil alle Aufrufer erst nach
-// erfolgreichem performKeyExchange + isTrusted-Check laufen) und schickt
-// eine actions.ServerReply.protocol_error zurück - dasselbe Wire-Format,
-// das auch für normale Action-Antworten benutzt wird, nur mit einem
-// anderen Tag. actionctl kann das jetzt strukturiert decodieren und dem
-// Nutzer eine echte Fehlermeldung mit Code anzeigen statt nur zu raten.
 fn sendProtocolError(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -146,34 +129,6 @@ fn handleConnection(
     var disc_src: [16]u8 = undefined;
     @memcpy(&disc_src, disc_buf[2..18]);
 
-    // Fix: Discovery-Reply vor Authentifizierung (Protokoll-Design).
-    //
-    // Vorher wurde keymng.isTrusted(disc_src) bereits hier geprüft, BEVOR
-    // der Peer im Handshake beweisen musste, dass er den privaten Schlüssel
-    // zu disc_src wirklich besitzt. disc_src sind nur 16 unauthentifizierte
-    // Bytes aus dem Discovery-Paket - jeder konnte eine trusted Adresse
-    // behaupten und bekam dafür schon eine Antwort (Bestätigung, dass der
-    // Server läuft, plus server_addr), lange bevor irgendeine Kryptografie
-    // geprüft wurde. Das ist ein Pre-Auth-Oracle: ein Angreifer kann allein
-    // über das Discovery-Reply herausfinden, welche Adressen trusted sind,
-    // ohne je einen Schlüssel zu besitzen.
-    //
-    // Der Fix verschiebt die Trust-Prüfung vollständig hinter den Handshake:
-    // Auf ein strukturell gültiges Discovery-Paket antwortet der Server
-    // jetzt immer gleich, unabhängig davon, ob disc_src trusted ist oder
-    // nicht. Erst nach performKeyExchange, wenn session.peer_address
-    // kryptografisch durch die Signatur des Peers bewiesen ist, wird
-    // genau einmal geprüft, ob dieser (jetzt bewiesene) Peer trusted ist.
-    // Ein Spoofer bekommt weiterhin nur ein generisches Discovery-Reply,
-    // erfährt daraus aber nicht mehr, ob "seine" Adresse trusted ist -
-    // das lässt sich erst nach einer gültigen Signatur feststellen, die
-    // ein Angreifer ohne den privaten Schlüssel nicht liefern kann.
-    //
-    // Hinweis: Wiederholtes Senden von Discovery-Paketen mit unterschied-
-    // lichen disc_src-Werten (whoami/echo-artiges Fingerprinting, wer wann
-    // antwortet) ist damit noch nicht verhindert - das bräuchte zusätzlich
-    // z.B. ein Rate-Limit schon auf Discovery-Ebene. Das ist laut Aufgabe
-    // hier bewusst nicht mit adressiert.
     var disc_reply_buf: [34]u8 = undefined;
     const disc_reply = sip.header.buildDiscoveryPacket(&disc_reply_buf, server_addr, disc_src) catch return;
     sip.synet.sendAll(sock, disc_reply) catch return;
@@ -189,8 +144,6 @@ fn handleConnection(
     );
     defer session.deinit();
 
-    // Die einzige Stelle, an der Trust geprüft wird: erst hier ist
-    // session.peer_address kryptografisch bewiesen (Signatur im Handshake).
     if (!keymng.isTrusted(io, session.peer_address)) {
         _ = metrics.untrusted_dropped.fetchAdd(1, .monotonic);
         if (verbose) {
@@ -256,10 +209,6 @@ fn handleConnection(
         return;
     };
 
-    // seq_num=0 ist hier sicher, weil jede Verbindung genau eine Response
-    // sendet und dann geschlossen wird. Falls das je auf mehrere Responses
-    // pro Verbindung umgestellt wird, MUSS seq_num hochgezählt werden,
-    // sonst wiederholt sich der aus (conn_id, seq_num) abgeleitete Nonce.
     const wire = sip.translation.buildOutboundPacket(
         io,
         allocator,
